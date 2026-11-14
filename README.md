@@ -19,7 +19,7 @@ All models deserve credit to the owners, so credit the authors here:
 - Korean Air A380 by zairiqzairiq (https://sketchfab.com/3d-models/korean-air-a380-33fa332e130c4138a1011bd7b1de97e2), CC BY 4.0
 - Boeing 777 by 1883 (https://sketchfab.com/3d-models/boeing-777-df830e5199634ae2955bf5b618ba6ab3), CC BY 4.0
 - Korean Air 747 by zairiq-zairiq-123-pixar-cars-bfdi (https://sketchfab.com/3d-models/korean-air-747-665ce49f8f1f46638767d6529926abb8), CC BY 4.0
-- Jeju Air 737 MAX 8: by Sofyan Kurniawan & Glazed_Kimpab (livery) (https://sketchfab.com/3d-models/737-max-lion-air-2747cad8b4c64122abe992c9ad1e8bd1)
+- Jeju Air 737 MAX 8: by Sofyan Kurniawan (https://sketchfab.com/3d-models/737-max-lion-air-2747cad8b4c64122abe992c9ad1e8bd1)
 - UPS McDonnell Douglas MD-11F by ahmdmhdymhmdshwat5 (https://sketchfab.com/3d-models/ups-mcdonnell-douglas-md-11f-b812206bbdd4429a9b34a18b7a5aff12), CC BY 4.0
 - Air India Boeing 787 by Tfs product (https://sketchfab.com/3d-models/air-india-boeing-787-free-if-68c5999a9e3346cd960633475238d4da), CC BY 4.0
 - Delta A350-900 by Alexrhee18 (https://sketchfab.com/3d-models/delta-a350-900-with-lights-6209d852227c46139143b31c9a31a062), CC BY 4.0
