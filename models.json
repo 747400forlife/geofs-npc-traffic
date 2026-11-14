@@ -1,0 +1,14 @@
+{
+  "models": [
+    { "name": "Korean Air A380", "url": "korean_air_a380.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0 },
+    { "name": "Boeing 777", "url": "boeing_777.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0 },
+    { "name": "Korean Air 747", "url": "korean_air_747.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0 },
+    { "name": "Korean Air A330-300", "url": "korean_air_a330.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 3, "minCount": 3, "weight": 3 },
+    { "name": "Jeju Air 737 MAX 8", "url": "jeju_air_737.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 4, "minCount": 4, "weight": 3 },
+    { "name": "UPS MD-11F", "url": "ups_md11f.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "weight": 3, "cargo": true, "minCount": 1 },
+    { "name": "Air India 787", "url": "air_india_787.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "weight": 3, "minCount": 1 },
+    { "name": "Delta A350-900", "url": "delta_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "weight": 3, "minCount": 1 },
+    { "name": "Lufthansa A350", "url": "lufthansa_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "weight": 1 },
+    { "name": "Finnair A350", "url": "finnair_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "weight": 1 }
+  ]
+}
