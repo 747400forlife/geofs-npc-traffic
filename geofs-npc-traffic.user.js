@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoFS NPC Traffic
 // @namespace    geofs-npc-traffic
-// @version      0.6.5
+// @version      0.7.0
 // @description  No UI. Fly near an airport and planes are already there: parked at gates, taxiing, and on final approach. Arrivals land, taxi to a gate and park; parked planes push back, taxi out and take off. Layout is scanned from OpenStreetMap.
 // @match        https://www.geo-fs.com/geofs.php*
 // @match        https://*.geo-fs.com/geofs.php*
@@ -26,14 +26,15 @@
   // ---------------------------------------------------------------- config
   const CFG = {
     // Where models.json and the .glb files live (your repo, raw GitHub links). Must end with a slash.
-    repoBase: 'https://raw.githubusercontent.com/747400forlife/geofs-npc-traffic/main/',
+    repoBase: 'https://raw.githubusercontent.com/GlazedKimpab/geofs-npc-traffic/main/',
 
     // Add more airports later. elev = field elevation in metres (fallback only).
     airports: [
       { icao: 'RKSI', name: 'Incheon', lat: 37.4602, lon: 126.4407, elev: 7, radiusM: 9000,
         // Cargo area, used only if OpenStreetMap has no apron/building named cargo. Centre is the cargo terminal
         // (the airport's published "Cargo Apron 1/2" are next to it). Move it if the MD-11 parks in the wrong place.
-        cargoHint: { lat: 37.4582, lon: 126.4764, radiusM: 1800 } }
+        cargoHint: { lat: 37.4582, lon: 126.4764, radiusM: 1800 } },
+      { icao: 'EKCH', name: 'Copenhagen', lat: 55.6180, lon: 12.6560, elev: 5, radiusM: 7500 }
     ],
 
     activeRadiusKm: 30,    // traffic exists only while you are this close (like Global Traffic)
@@ -403,6 +404,7 @@
         max: m.maxCount || 0,                                  // 0 = no limit on how many of this plane at once
         min: m.minCount || 0,                                  // keep at least this many of this plane around
         cargo: !!m.cargo,                                      // true = parks and taxis in the cargo area only
+        airports: Array.isArray(m.airports) ? m.airports : [],   // e.g. ["EKCH"] = only appears at that airport (empty = everywhere)
         weight: m.weight != null ? m.weight : 1                // relative chance of being picked (default 1)
       }));
       log(models.length + ' model(s): ' + models.map(m => m.name).join(', '));
@@ -416,13 +418,19 @@
   // cargo planes use cargo stands and everyone else stays out of them (only when the airport has a cargo area)
   const standOk = (ap, p, m) => !ap.hasCargo || !m || !!m.cargo === !!p.cargo;
 
+  // the models that may appear at this airport (a model with an airports list stays at those airports)
+  const modelsFor = ap => {
+    const l = ap ? models.filter(m => !m.airports.length || m.airports.includes(ap.cfg.icao)) : models;
+    return l.length ? l : models;
+  };
+
   // weighted random pick that respects each model's maxCount (e.g. only one MD-11 at a time)
-  function pickModel() {
-    const live = {};
+  function pickModel(ap) {
+    const live = {}, all = modelsFor(ap);
     npcs.forEach(n => { live[n.m.name] = (live[n.m.name] || 0) + 1; });
-    let pool = models.filter(m => !m.max || (live[m.name] || 0) < m.max);
-    if (!pool.length) pool = models.filter(m => !m.max);
-    if (!pool.length) pool = models;
+    let pool = all.filter(m => !m.max || (live[m.name] || 0) < m.max);
+    if (!pool.length) pool = all.filter(m => !m.max);
+    if (!pool.length) pool = all;
     let r = Math.random() * pool.reduce((t, m) => t + m.weight, 0);
     for (const m of pool) { r -= m.weight; if (r <= 0) return m; }
     return pool[pool.length - 1];
@@ -577,7 +585,7 @@
   let npcSeq = 0;
   function newNpc(ap, extra) {
     return Object.assign({
-      id: ++npcSeq, ap, m: pickModel(), pitch: 0, roll: 0, prevAgl: 0, wait: 0, seg: null,
+      id: ++npcSeq, ap, m: pickModel(ap), pitch: 0, roll: 0, prevAgl: 0, wait: 0, seg: null,
       gElev: ap.cfg.elev, gT: 0, gOK: false, rwy: null, gate: null
     }, extra);
   }
@@ -594,7 +602,7 @@
     opts = opts || {};
     if (!models.length) return false;
     const startS = opts.startS != null ? opts.startS : -9000;
-    const model = opts.model || pickModel();
+    const model = opts.model || pickModel(ap);
     const plan = planArrival(ap, startS, model);
     if (!plan) return false;
     const route = plan.route, gs = Math.tan(CFG.glideDeg * rad);
@@ -626,7 +634,7 @@
   function addParked(ap, count, minDist, px, py, model) {
     const taken = npcs.filter(n => n.ap === ap && n.phase === 'park');
     for (let k = 0; k < count; k++) {
-      const m = model || pickModel();
+      const m = model || pickModel(ap);
       const p = shuffle(ap.parks.filter(q => !q.taken && standOk(ap, q, m))).find(q =>
         (!minDist || Math.hypot(q.x - px, q.y - py) >= minDist) &&
         !taken.some(t => Math.hypot(t.x - q.x, t.y - q.y) < CFG.minStandSpacingM));
@@ -648,7 +656,7 @@
 
   // models with minCount (e.g. four Jeju Air 737s): top up to that number. At arrival all at once, later one per check.
   function fillMinimums(ap, instant, px, py) {
-    for (const m of models) {
+    for (const m of modelsFor(ap)) {
       const live = npcs.filter(n => n.m === m).length;
       if (!m.min || live >= m.min) continue;
       if (instant) addParked(ap, m.min - live, 0, 0, 0, m);
@@ -926,7 +934,7 @@
       if (bootTries++ % 10 === 0) log('waiting for: ' + missing.join(', '));
       return setTimeout(boot, 1000);
     }
-    log('v0.6.5 started');
+    log('v0.7.0 started');
     loadModels();
     airports.forEach(scanAirport);                         // scan now, so the data is ready before you get near
     try { geofs.api.viewer.scene.preRender.addEventListener(tick); } catch (e) { setInterval(tick, 33); }
