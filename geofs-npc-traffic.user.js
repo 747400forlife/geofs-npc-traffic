@@ -26,7 +26,7 @@
   // ---------------------------------------------------------------- config
   const CFG = {
     // Where models.json and the .glb files live (your repo, raw GitHub links). Must end with a slash.
-    repoBase: 'https://raw.githubusercontent.com/GlazedKimpab/geofs-npc-traffic/main/',
+    repoBase: 'https://raw.githubusercontent.com/747400forlife/geofs-npc-traffic/main/',
 
     // Add more airports later. elev = field elevation in metres (fallback only).
     airports: [
