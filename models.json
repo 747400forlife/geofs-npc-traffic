@@ -8,8 +8,8 @@
     { "name": "UPS MD-11F", "url": "ups_md11f.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "minCount": 1, "weight": 3, "cargo": true, "airports": ["RKSI"] },
     { "name": "Air India 787", "url": "air_india_787.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "minCount": 1, "weight": 3, "airports": ["RKSI"] },
     { "name": "Delta A350-900", "url": "delta_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "minCount": 1, "weight": 3, "airports": ["RKSI"] },
-    { "name": "Lufthansa A350", "url": "lufthansa_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1 },
-    { "name": "Finnair A350", "url": "finnair_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1 },
+    { "name": "Lufthansa A350", "url": "lufthansa_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1, "airports": ["RKSI"] },
+    { "name": "Finnair A350", "url": "finnair_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1, "airports": ["RKSI"] },
     { "name": "Air Greenland A330-800", "url": "air_greenland_a330_800.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "minCount": 1, "weight": 3, "airports": ["EKCH"] },
     { "name": "SAS A350-900", "url": "sas_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 4, "minCount": 4, "weight": 3, "airports": ["EKCH"] }
   ]
