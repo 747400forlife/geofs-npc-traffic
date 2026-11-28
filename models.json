@@ -11,7 +11,8 @@
     { "name": "Lufthansa A350", "url": "lufthansa_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1, "airports": ["RKSI"] },
     { "name": "Finnair A350", "url": "finnair_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "weight": 1, "airports": ["RKSI"] },
     { "name": "Air Greenland A330-800", "url": "air_greenland_a330_800.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 1, "minCount": 1, "weight": 3, "airports": ["EKCH"] },
-    { "name": "SAS A350-900", "url": "sas_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 4, "minCount": 4, "weight": 3, "airports": ["EKCH"] },
-    { "name": "SAS A330-300", "url": "sas_a330.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 5, "minCount": 6, "weight": 3, "airports": ["EKCH"] }
+    { "name": "SAS A350-900", "url": "sas_a350.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 3, "minCount": 4, "weight": 3, "airports": ["EKCH"] },
+    { "name": "SAS A330-300", "url": "sas_a330.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 4, "minCount": 3, "weight": 3, "airports": ["EKCH"] }
+    { "name": "SAS A320", "url": "sas_a320.glb", "scale": 1, "headingOffset": 0, "pitchOffset": 0, "rollOffset": 0, "altOffset": 0, "maxCount": 3, "minCount": 3, "weight": 3, "airports": ["EKCH"] }
   ]
 }
