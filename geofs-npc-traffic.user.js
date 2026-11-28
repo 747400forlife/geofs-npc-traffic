@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoFS NPC Traffic
 // @namespace    geofs-npc-traffic
-// @version      0.6.5
+// @version      0.8.4
 // @description  No UI. Fly near an airport and planes are already there: parked at gates, taxiing, and on final approach. Arrivals land, taxi to a gate and park; parked planes push back, taxi out and take off. Layout is scanned from OpenStreetMap.
 // @match        https://www.geo-fs.com/geofs.php*
 // @match        https://*.geo-fs.com/geofs.php*
@@ -33,11 +33,13 @@
       { icao: 'RKSI', name: 'Incheon', lat: 37.4602, lon: 126.4407, elev: 7, radiusM: 9000,
         // Cargo area, used only if OpenStreetMap has no apron/building named cargo. Centre is the cargo terminal
         // (the airport's published "Cargo Apron 1/2" are next to it). Move it if the MD-11 parks in the wrong place.
-        cargoHint: { lat: 37.4582, lon: 126.4764, radiusM: 1800 } }
+        cargoHint: { lat: 37.4582, lon: 126.4764, radiusM: 1800 } },
+      { icao: 'EKCH', name: 'Copenhagen', lat: 55.6180, lon: 12.6560, elev: 5, radiusM: 7500 }
     ],
 
     activeRadiusKm: 30,    // traffic exists only while you are this close (like Global Traffic)
     scanEveryS: 3,         // how often the proximity check runs
+    showStatus: true,      // small text box in the corner while an airport is loading or if something is wrong (false = never show anything)
 
     parked: 20,            // planes sitting at gates the moment you arrive
     minStandSpacingM: 60,  // keeps parked planes from overlapping
@@ -46,9 +48,12 @@
     taxiing: 2,            // planes already taxiing in from the runway the moment you arrive
     queued: 2,             // planes already waiting at the runway to take off the moment you arrive
     taxiingOut: 2,         // planes already taxiing out to the runway the moment you arrive
-    maxMoving: 4,          // arriving planes (approach/taxi) alive at once; new ones appear as old ones park
-    departEveryS: 30,      // a parked plane pushes back, taxis out and takes off this often (lower = more takeoffs)
-    maxDepartures: 6,      // departing planes at once (they queue at the runway)
+    maxMoving: 8,          // arriving planes (approach/taxi) alive at once; new ones appear as old ones park
+    arrivalEveryS: 20,     // a new plane joins the approach this often at most (lower = more landings)
+    departEveryS: 12,      // a parked plane pushes back, taxis out and takes off this often (lower = more takeoffs)
+    maxDepartures: 10,     // departing planes at once (they queue at the runway)
+    finalSeparationM: 3500, // minimum distance between two planes on final approach to the same runway
+    clearM: 3500,          // a departure may enter a runway only if nobody is landing closer than this
 
     approachKts: 140,
     taxiKts: 25,
@@ -56,7 +61,9 @@
     accel: 2.5,            // m/s^2
     holdShortM: 80,        // planes stop this far before a runway when it is in use (takeoff roll or landing)
     takeoffAccel: 3.2,     // m/s^2 during the takeoff roll and climb
-    decel: 4,              // m/s^2
+    decel: 4,              // m/s^2 braking on taxiways
+    rolloutDecel: 2.2,     // m/s^2 braking on the runway after touchdown (autobrake + reverse thrust)
+    airDecel: 1,           // m/s^2 speed change in the air
     hideBeyondKm: 20       // models are hidden when farther than this from the camera
   };
 
@@ -83,13 +90,28 @@
     const i = geofs.aircraft && geofs.aircraft.instance;
     return i && i.llaLocation ? i.llaLocation : null;
   }
-  function groundAlt(lat, lon) {
+  // height of the ground in the same height system the planes are placed in (Cesium: metres above the ellipsoid)
+  function globeHeight(lat, lon) {
     try {
-      const g = geofs.getGroundAltitude(lat, lon);
-      if (g && g.location) return g.location[2];
-      if (typeof g === 'number') return g;
+      const C = W.Cesium, v = geofs.api && geofs.api.viewer;
+      if (C && v && v.scene && v.scene.globe && v.scene.globe.getHeight) {
+        const h = v.scene.globe.getHeight(C.Cartographic.fromDegrees(lon, lat));
+        if (h != null && isFinite(h)) return h;               // undefined = terrain not loaded there yet
+      }
     } catch (e) {}
     return null;
+  }
+  function geofsHeight(lat, lon) {
+    try {
+      const g = geofs.getGroundAltitude(lat, lon);
+      if (g && g.location && isFinite(g.location[2])) return g.location[2];
+      if (typeof g === 'number' && isFinite(g)) return g;
+    } catch (e) {}
+    return null;
+  }
+  function groundAlt(lat, lon) {
+    const a = globeHeight(lat, lon);
+    return a != null ? a : geofsHeight(lat, lon);
   }
 
   // ---------------------------------------------------------------- heap + dijkstra
@@ -150,6 +172,7 @@
       'way["aeroway"~"^(taxiway|taxilane)$"]' + ar + ';' +
       'node["aeroway"~"^(parking_position|gate)$"]' + ar + ';' +
       'way["aeroway"="parking_position"]' + ar + ';' +
+      'way["aeroway"="apron"]' + ar + ';' +
       ');out geom;';
   }
   // Optional extra, asked for separately so that a slow answer can never spoil the essential data
@@ -166,8 +189,11 @@
   function validOsm(j) {
     if (!j || !Array.isArray(j.elements)) throw new Error('answer had no data' + (j && j.remark ? ' (' + j.remark + ')' : ''));
     const has = f => j.elements.some(e => e.tags && f(e.tags.aeroway));
-    if (!has(a => a === 'runway') || !has(a => a === 'taxiway' || a === 'taxilane') || !has(a => a === 'parking_position' || a === 'gate'))
-      throw new Error('answer was empty or incomplete' + (j.remark ? ' (' + j.remark + ')' : ''));
+    const miss = [];
+    if (!has(a => a === 'runway')) miss.push('runways');
+    if (!has(a => a === 'taxiway' || a === 'taxilane')) miss.push('taxiways');
+    if (!has(a => a === 'parking_position' || a === 'gate' || a === 'apron')) miss.push('stands or aprons');
+    if (miss.length) throw new Error('answer had no ' + miss.join(', ') + ' (' + j.elements.length + ' elements)' + (j.remark ? ' (' + j.remark + ')' : ''));
     return j;
   }
   const anyElements = j => { if (!j || !Array.isArray(j.elements)) throw new Error('answer had no data'); return j; };
@@ -177,7 +203,7 @@
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== 'function') return reject(new Error('GM_xmlhttpRequest not available'));
       GM_xmlhttpRequest({
-        method, url, data: body, timeout: timeout || 90000,
+        method, url, data: body, timeout: timeout || 45000,
         onload: r => {
           if (r.status < 200 || r.status >= 300) return reject(new Error('HTTP ' + r.status));
           try { resolve(JSON.parse(r.responseText)); } catch (e) { reject(new Error('answer was not JSON')); }
@@ -188,20 +214,26 @@
     });
   }
 
+  function fetchT(url, opts, ms) {
+    if (typeof AbortController === 'undefined') return fetch(url, opts);
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), ms || 40000);
+    return fetch(url, Object.assign({}, opts, { signal: ac.signal })).finally(() => clearTimeout(t));
+  }
+
   // tries every server and method until one gives an answer that passes `check`
   async function overpass(q, check, quick) {
     const errs = [], hosts = quick ? OVERPASS_HOSTS.slice(0, 2) : OVERPASS_HOSTS, name = h => h.replace('https://', '').split('/')[0];
     const modes = quick ? ['GET'] : ['GET', 'POST'];
     if (typeof GM_xmlhttpRequest === 'function') {
       for (const h of hosts) for (const mode of modes) {
-        try { return check(await (mode === 'GET' ? gmRequest(h + '?data=' + encodeURIComponent(q), 'GET', undefined, quick ? 25000 : 90000) : gmRequest(h, 'POST', q))); }
+        try { return check(await (mode === 'GET' ? gmRequest(h + '?data=' + encodeURIComponent(q), 'GET', undefined, quick ? 25000 : 45000) : gmRequest(h, 'POST', q))); }
         catch (e) { errs.push('GM ' + name(h) + ' ' + mode + ' ' + e.message); }
       }
     }
     for (const h of hosts) for (const mode of modes) {
       try {
         // plain GET, or a POST with a text body: neither triggers a CORS preflight
-        const r = mode === 'GET' ? await fetch(h + '?data=' + encodeURIComponent(q)) : await fetch(h, { method: 'POST', body: q });
+        const r = mode === 'GET' ? await fetchT(h + '?data=' + encodeURIComponent(q), {}, 40000) : await fetchT(h, { method: 'POST', body: q }, 40000);
         if (!r.ok) { errs.push(name(h) + ' ' + mode + ' HTTP ' + r.status); continue; }
         return check(await r.json());
       } catch (e) { errs.push(name(h) + ' ' + mode + ' ' + e.message); }
@@ -212,7 +244,7 @@
   const CARGO_RE = /cargo|freight|화물/i;
 
   function compactify(o, data) {
-    const rw = {}, taxi = [], parks = [], cargoPoly = [], cargoPts = [];
+    const rw = {}, taxi = [], parks = [], cargoPoly = [], cargoPts = [], aprons = [];
     const r1 = v => Math.round(v * 10) / 10;
     const cen = pts => [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
     for (const el of data.elements || []) {
@@ -223,7 +255,7 @@
         if (aw === 'runway') { const ref = tags.ref || ('id' + el.id); (rw[ref] = rw[ref] || []).push(...pts); }
         else if (aw === 'taxiway' || aw === 'taxilane') taxi.push(pts);
         else if (aw === 'parking_position' || aw === 'gate') { const c = cen(pts); parks.push([c[0], c[1], named ? 1 : 0]); }
-        else if (aw === 'apron' && named && pts.length > 2) cargoPoly.push(pts);
+        else if (aw === 'apron' && pts.length > 3) { aprons.push(pts); if (named) cargoPoly.push(pts); }
         if (named && aw !== 'runway' && aw !== 'taxiway' && aw !== 'taxilane' && aw !== 'apron') cargoPts.push(cen(pts).map(r1));
       } else if (el.type === 'node' && el.lat != null && (aw === 'parking_position' || aw === 'gate')) {
         const c = toXY(o, el.lat, el.lon); parks.push([c[0], c[1], named ? 1 : 0]);
@@ -232,8 +264,28 @@
         const c = toXY(o, el.center ? el.center.lat : el.lat, el.center ? el.center.lon : el.lon); cargoPts.push(c.map(r1));
       }
     }
-    return { rw, taxi, parks, cargoPoly, cargoPts };
+    return { rw, taxi, parks, cargoPoly, cargoPts, aprons };
   }
+
+  const polyContains = (x, y, poly) => {
+    let c = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  const polyArea = poly => Math.abs(poly.reduce((s, p, i) => { const q = poly[(i + 1) % poly.length]; return s + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
+  // distance from a point to a polyline (closed = also the segment from the last point back to the first)
+  const lineDist = (x, y, pts, closed) => {
+    let best = Infinity;
+    for (let i = closed ? 0 : 1, j = closed ? pts.length - 1 : 0; i < pts.length; j = i++) {
+      const ax = pts[j][0], ay = pts[j][1], dx = pts[i][0] - ax, dy = pts[i][1] - ay, l2 = dx * dx + dy * dy;
+      const t = l2 ? clamp(((x - ax) * dx + (y - ay) * dy) / l2, 0, 1) : 0;
+      best = Math.min(best, Math.hypot(x - (ax + t * dx), y - (ay + t * dy)));
+    }
+    return best;
+  };
 
   const snapKey = (x, y) => Math.round(x / 3) + ',' + Math.round(y / 3);
 
@@ -276,10 +328,37 @@
     ap.runways.forEach(r => r.junctions.forEach(j => ap.rwyNode.set(j.n.k, r)));
     // attach every stand to the closest taxi node
     const nodes = Array.from(ap.graph.values());
-    for (const p of c.parks) {
-      let best = null, bd = 150;
-      for (const n of nodes) { const d = Math.hypot(n.x - p[0], n.y - p[1]); if (d < bd) { bd = d; best = n; } }
-      if (best) ap.parks.push({ x: p[0], y: p[1], att: best, taken: false, cargo: false });
+    const attach = maxD => {
+      ap.parks = [];
+      for (const p of c.parks) {
+        let best = null, bd = maxD;
+        for (const n of nodes) { const d = Math.hypot(n.x - p[0], n.y - p[1]); if (d < bd) { bd = d; best = n; } }
+        if (best) ap.parks.push({ x: p[0], y: p[1], att: best, taken: false, cargo: false });
+      }
+    };
+    attach(150);
+    if (ap.parks.length < 8) attach(400);                  // few stands close to a mapped taxiway: accept farther ones
+
+    // no (or hardly any) stands mapped: generate them on the aprons, a grid of spots away from the taxiway centrelines
+    ap.synthStands = 0;
+    if (ap.parks.length < 6 && (c.aprons || []).length) {
+      const cand = [];
+      for (const poly of c.aprons) {
+        if (polyArea(poly) < 8000) continue;
+        let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+        for (const q of poly) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); y0 = Math.min(y0, q[1]); y1 = Math.max(y1, q[1]); }
+        for (let x = x0 + 30; x < x1; x += 70) for (let y = y0 + 30; y < y1; y += 70) {
+          if (!polyContains(x, y, poly) || lineDist(x, y, poly, true) < 35) continue;
+          if (c.taxi.some(t => lineDist(x, y, t, false) < 32)) continue;                 // not on a taxiway
+          let best = null, bd = 260;
+          for (const n of nodes) { const d = Math.hypot(n.x - x, n.y - y); if (d < bd) { bd = d; best = n; } }
+          if (best) cand.push({ x, y, att: best, taken: false, cargo: false, synth: true });
+        }
+      }
+      shuffle(cand);
+      const keep = [];
+      for (const q of cand) { if (keep.length >= 160) break; if (!keep.some(k => Math.hypot(k.x - q.x, k.y - q.y) < 65)) keep.push(q); }
+      ap.parks = ap.parks.concat(keep); ap.synthStands = keep.length;
     }
     // cargo stands: named cargo themselves, inside a cargo-named apron, or next to something named cargo
     const inPoly = (x, y, poly) => {
@@ -302,6 +381,11 @@
       const h = ap.cfg.cargoHint, hc = toXY(ap.o, h.lat, h.lon);
       ap.parks.forEach(p => { p.cargo = Math.hypot(p.x - hc[0], p.y - hc[1]) < h.radiusM; });
       if (ap.parks.some(p => p.cargo)) ap.cargoSource = 'cargoHint';
+    }
+    ap.cargoIgnored = 0;
+    const nCargo = ap.parks.filter(p => p.cargo).length;
+    if (nCargo && (nCargo > ap.parks.length * 0.6 || ap.parks.length - nCargo < 6)) {   // nearly every stand "cargo": the mapping is unreliable, do not let it keep passenger planes out
+      ap.parks.forEach(p => { p.cargo = false; }); ap.cargoSource = null; ap.cargoIgnored = nCargo;
     }
     ap.hasCargo = ap.parks.some(p => p.cargo);
     if (ap.runways.length) {
@@ -348,7 +432,7 @@
   }
 
   // saved/loaded data is only used if it holds a runway, a taxiway and a stand
-  const validCompact = c => !!(c && c.rw && Object.keys(c.rw).length && c.taxi && c.taxi.length && c.parks && c.parks.length);
+  const validCompact = c => !!(c && c.rw && Object.keys(c.rw).length && c.taxi && c.taxi.length && ((c.parks && c.parks.length) || (c.aprons && c.aprons.length)));
 
   async function scanAirport(ap) {
     ap.state = 'scanning';
@@ -369,6 +453,7 @@
         try { localStorage.setItem(ck, JSON.stringify(compact)); } catch (e) { /* too big, skip cache */ }
       } catch (e) {
         ap.state = 'failed'; ap.tries = (ap.tries || 0) + 1;
+        ap.err = String(e && e.message ? e.message : e).slice(0, 420) + '  (F12 console has a fix)';
         loadFailedHelp(ap, e);
         if (ap.tries < 3) setTimeout(() => { if (ap.state === 'failed' && !ap.parks.length) ap.state = 'idle'; }, 120000);   // try again in 2 minutes
         return;
@@ -376,6 +461,8 @@
     }
     buildAirport(ap, compact);
     ap.state = ap.runways.length && ap.parks.length ? 'ready' : 'failed';
+    ap.info = ap.runways.length + ' runways, ' + ap.parks.length + ' stands' + (ap.synthStands ? ' (' + ap.synthStands + ' generated from aprons)' : '') + (ap.cargoIgnored ? ', cargo mapping ignored' : '');
+    ap.err = ap.state === 'failed' ? 'data held ' + Object.keys(compact.rw).length + ' runway refs (' + ap.runways.length + ' usable), ' + compact.taxi.length + ' taxiways, ' + (compact.parks || []).length + ' stands, ' + (compact.aprons || []).length + ' aprons -> ' + ap.parks.length + ' usable stands' : null;
     log(ap.cfg.icao + ': ' + ap.runways.length + ' runways, ' + ap.graph.size + ' taxi nodes, ' + ap.parks.length + ' stands (' + ap.parks.filter(p => p.cargo).length + ' cargo' + (ap.cargoSource ? ', from ' + ap.cargoSource : ', none found') + ')' +
       (ap.state === 'failed' ? ' (not enough data to run traffic)' : ''));
     if (ap.state === 'failed') {                               // never keep data that does not work
@@ -403,6 +490,7 @@
         max: m.maxCount || 0,                                  // 0 = no limit on how many of this plane at once
         min: m.minCount || 0,                                  // keep at least this many of this plane around
         cargo: !!m.cargo,                                      // true = parks and taxis in the cargo area only
+        airports: Array.isArray(m.airports) ? m.airports : [],   // e.g. ["EKCH"] = only appears at that airport (empty = everywhere)
         weight: m.weight != null ? m.weight : 1                // relative chance of being picked (default 1)
       }));
       log(models.length + ' model(s): ' + models.map(m => m.name).join(', '));
@@ -416,13 +504,19 @@
   // cargo planes use cargo stands and everyone else stays out of them (only when the airport has a cargo area)
   const standOk = (ap, p, m) => !ap.hasCargo || !m || !!m.cargo === !!p.cargo;
 
-  // weighted random pick that respects each model's maxCount (e.g. only one MD-11 at a time)
-  function pickModel() {
-    const live = {};
+  // the models that may appear at this airport (a model with an airports list stays at those airports)
+  const modelsFor = ap => {
+    const l = ap ? models.filter(m => !m.airports.length || m.airports.includes(ap.cfg.icao)) : models;
+    return l.length ? l : models;
+  };
+
+  // weighted random pick. maxCount is a hard limit (e.g. only one MD-11 at a time): when every model allowed
+  // at this airport is already at its limit, nothing more is added and null is returned.
+  function pickModel(ap) {
+    const live = {}, all = modelsFor(ap);
     npcs.forEach(n => { live[n.m.name] = (live[n.m.name] || 0) + 1; });
-    let pool = models.filter(m => !m.max || (live[m.name] || 0) < m.max);
-    if (!pool.length) pool = models.filter(m => !m.max);
-    if (!pool.length) pool = models;
+    const pool = all.filter(m => !m.max || (live[m.name] || 0) < m.max);
+    if (!pool.length) return null;
     let r = Math.random() * pool.reduce((t, m) => t + m.weight, 0);
     for (const m of pool) { r -= m.weight; if (r <= 0) return m; }
     return pool[pool.length - 1];
@@ -436,7 +530,12 @@
   function render(n) {
     const C = W.Cesium, v = viewer();
     if (!C || !v) return;
-    const ll = toLL(n.ap.o, n.x, n.y);
+    const now = performance.now();
+    if (!n.gOK && now - (n.gTryAt || 0) > 400) { n.gTryAt = now; sampleGround(n); }
+    if (!n.gOK && n.agl < 60) { if (n.ent) n.ent.show = false; return; }   // ground height not known yet: never put a plane underground
+    if (n.ent && n.ent.show === false) n.ent.show = true;
+    const lat = n.latOff || 0;                                  // sideways shift while passing an oncoming plane on a taxiway
+    const ll = toLL(n.ap.o, n.x + Math.cos(n.hdg * rad) * lat, n.y - Math.sin(n.hdg * rad) * lat);
     const alt = n.gElev + n.m.off + n.agl;
     const pos = C.Cartesian3.fromDegrees(ll[1], ll[0], alt);
     // Cesium heading 0 points east, so compass heading h becomes h - 90
@@ -474,17 +573,17 @@
   // a plane may enter the runway to depart only if nothing is on it or within 4 km of landing
   function depClear(r) {
     if (r.dep || r.crossing.size) return false;
-    for (const a of r.arr) if (alongRunway(a) > -4000) return false;
+    for (const a of r.arr) if (alongRunway(a) > -CFG.clearM) return false;
     return true;
   }
 
   function runwayFreeAt(r, s0) {
     // a departure is holding short: keep arrivals off (on a shared runway, still let one in every ~3 minutes)
-    if (r.waiting.size && !(r.role === 'both' && performance.now() - (r.lastArr || 0) > 200000)) return false;
+    if (r.waiting.size && !(r.role === 'both' && performance.now() - (r.lastArr || 0) > 90000)) return false;
     if (r.dep && s0 > -6000) return false;
     for (const a of r.arr) {
       const sa = alongRunway(a);
-      if (Math.abs(sa - s0) < 4500) return false;
+      if (Math.abs(sa - s0) < CFG.finalSeparationM) return false;
       if (sa >= 0 && s0 > -3500) return false;
     }
     return true;
@@ -536,7 +635,8 @@
         .filter(e => e.s >= 900 && e.s <= r.len - 300));
       exits.sort((p, q) => (p.s >= 1500 ? 0 : 1) - (q.s >= 1500 ? 0 : 1));
 
-      for (const e of exits.slice(0, 5)) {
+      const longExits = exits.filter(e => e.s >= 1300);   // enough runway to brake normally; short runways use whatever exists
+      for (const e of (longExits.length ? longExits : exits).slice(0, 5)) {
         const { dist, prev } = dijkstra(e.j.n);
         const opts = ap.parks.filter(p => !p.taken && dist[p.att.k] !== undefined && standOk(ap, p, model));
         if (!opts.length) continue;
@@ -547,13 +647,20 @@
         path.reverse();
 
         const N = (s, agl, spd, ph) => ({ x: thr.x + dir.x * s, y: thr.y + dir.y * s, s, agl, spd, ph });
+        // stabilised 3 degree approach, threshold crossed at ~50 ft, round-out (flare) with an exponential
+        // decay of height and speed, touchdown ~350 m past the threshold, then braking to taxi speed at the exit
         const route = [
           N(-9000, gs * (9000 + td), ak, 'approach'),
           N(-4000, gs * (4000 + td), ak, 'approach'),
-          N(-1000, gs * (1000 + td), ak - 5, 'approach'),
-          N(0, gs * td, ak - 8, 'approach'),
-          N(td, 0, ak - 10, 'flare'),
-          N(Math.max(td + 300, e.s - 100), 0, 28, 'rollout')
+          N(-1500, gs * (1500 + td), ak - 3, 'approach'),
+          N(-500, gs * (500 + td), ak - 5, 'approach'),
+          N(0, gs * td, ak - 6, 'approach'),
+          N(120, 8.5, ak - 8, 'flare'),
+          N(190, 3.4, ak - 9, 'flare'),
+          N(250, 1.3, ak - 10, 'flare'),
+          N(310, 0.35, ak - 10, 'flare'),
+          N(360, 0, ak - 11, 'touch'),
+          N(Math.max(td + 800, e.s - 100), 0, 28, 'rollout')
         ];
         const relIdx = route.length;                     // first taxi node (the exit)
         path.forEach((n, idx) => {
@@ -577,7 +684,7 @@
   let npcSeq = 0;
   function newNpc(ap, extra) {
     return Object.assign({
-      id: ++npcSeq, ap, m: pickModel(), pitch: 0, roll: 0, prevAgl: 0, wait: 0, seg: null,
+      id: ++npcSeq, ap, m: (extra && extra.m) || pickModel(ap), pitch: 0, roll: 0, prevAgl: 0, wait: 0, seg: null,
       gElev: ap.cfg.elev, gT: 0, gOK: false, rwy: null, gate: null
     }, extra);
   }
@@ -594,7 +701,8 @@
     opts = opts || {};
     if (!models.length) return false;
     const startS = opts.startS != null ? opts.startS : -9000;
-    const model = opts.model || pickModel();
+    const model = opts.model || pickModel(ap);
+    if (!model) return false;
     const plan = planArrival(ap, startS, model);
     if (!plan) return false;
     const route = plan.route, gs = Math.tan(CFG.glideDeg * rad);
@@ -605,7 +713,10 @@
     if (opts.midTaxi) {
       const lo = plan.relIdx + 1, hi = route.length - 2;
       if (hi < lo) return false;
-      const idx = lo + Math.floor(Math.random() * (hi - lo + 1)), w = route[idx], nx = route[idx + 1];
+      let idx = lo + Math.floor(Math.random() * (hi - lo + 1));
+      for (let t = 0; t < 8 && groundNear(ap, route[idx].x, route[idx].y, 140); t++) idx = lo + Math.floor(Math.random() * (hi - lo + 1));
+      if (groundNear(ap, route[idx].x, route[idx].y, 140)) return false;
+      const w = route[idx], nx = route[idx + 1];
       Object.assign(n, { x: w.x, y: w.y, agl: 0, i: idx + 1, phase: 'taxi', v: CFG.taxiKts * kts,
         hdg: norm360(Math.atan2(nx.x - w.x, nx.y - w.y) * deg) });
     } else {
@@ -622,14 +733,23 @@
     return true;
   }
 
+  // is another plane standing or moving on the ground within r metres of this point?
+  const groundNear = (ap, x, y, r, except) => npcs.some(o => o !== except && o.ap === ap && o.phase !== 'park' && o.agl < 3 && Math.hypot(o.x - x, o.y - y) < r);
+
+  // how many planes an airport can ever hold when every model there is limited by maxCount (Infinity otherwise)
+  const fleetCap = ap => { const all = modelsFor(ap); return all.length && all.every(m => m.max) ? all.reduce((t, m) => t + m.max, 0) : Infinity; };
+  // with a small fleet the parked planes are spread out over the airport instead of sitting side by side
+  const spacingFor = ap => (fleetCap(ap) <= 12 ? 350 : CFG.minStandSpacingM);
+
   // adds up to `count` parked planes at free stands; stands closer than minDist to the player are skipped
   function addParked(ap, count, minDist, px, py, model) {
     const taken = npcs.filter(n => n.ap === ap && n.phase === 'park');
     for (let k = 0; k < count; k++) {
-      const m = model || pickModel();
-      const p = shuffle(ap.parks.filter(q => !q.taken && standOk(ap, q, m))).find(q =>
-        (!minDist || Math.hypot(q.x - px, q.y - py) >= minDist) &&
-        !taken.some(t => Math.hypot(t.x - q.x, t.y - q.y) < CFG.minStandSpacingM));
+      const m = model || pickModel(ap);
+      if (!m) break;
+      const free = shuffle(ap.parks.filter(q => !q.taken && standOk(ap, q, m)));
+      const fits = sp => q => (!minDist || Math.hypot(q.x - px, q.y - py) >= minDist) && !taken.some(t => Math.hypot(t.x - q.x, t.y - q.y) < sp);
+      const p = free.find(fits(spacingFor(ap))) || free.find(fits(CFG.minStandSpacingM));
       if (!p) continue;
       const dx = p.x - p.att.x, dy = p.y - p.att.y;
       let hdg;
@@ -648,11 +768,14 @@
 
   // models with minCount (e.g. four Jeju Air 737s): top up to that number. At arrival all at once, later one per check.
   function fillMinimums(ap, instant, px, py) {
-    for (const m of models) {
+    for (const m of modelsFor(ap)) {
       const live = npcs.filter(n => n.m === m).length;
       if (!m.min || live >= m.min) continue;
-      if (instant) addParked(ap, m.min - live, 0, 0, 0, m);
-      else {
+      if (instant) {
+        addParked(ap, m.min - live, 0, 0, 0, m);
+        if (npcs.filter(n => n.m === m).length < m.min)
+          console.warn('[NPC Traffic] Could not place the ' + m.name + ' at ' + ap.cfg.icao + ' (free stands: ' + ap.parks.filter(p => !p.taken).length + ' of ' + ap.parks.length + ')');
+      } else {
         if (!spawnArrival(ap, { model: m })) addParked(ap, 1, 2000, px, py, m);   // arrivals first, else out of sight
         break;                                                                     // one per check keeps arrivals spaced out
       }
@@ -661,6 +784,22 @@
 
   // everything appears at once, no waiting
   function populate(ap) {
+    const cap = fleetCap(ap);
+    if (cap <= 12) {
+      // small fleet: some parked far apart, the rest spread over approach, taxiways and the way out, nobody bunched at the runway
+      const nParked = Math.max(1, Math.ceil(cap * 0.6));
+      safe('populate: parked planes', () => addParked(ap, nParked, 0));
+      let left = cap - npcs.filter(n => n.ap === ap).length;
+      for (const kd of shuffle(['arr', 'in', 'out'])) {
+        if (left <= 0) break;
+        const ok = safe('populate: ' + kd, () => kd === 'arr' ? spawnArrival(ap, { startS: -rand(4500, 9000) }) : kd === 'in' ? spawnArrival(ap, { midTaxi: true }) : startDeparture(ap, 'taxi'));
+        if (ok && kd !== 'out') left--;
+      }
+      safe('populate: minimum counts', () => fillMinimums(ap, true));
+      ap.lastDep = performance.now() - rand(0, CFG.departEveryS) * 1000;
+      log(ap.cfg.icao + ' populated (small fleet): ' + npcs.filter(n => n.ap === ap).length + ' planes');
+      return;
+    }
     safe('populate: parked planes', () => spawnParked(ap));
     safe('populate: minimum counts', () => fillMinimums(ap, true));
     for (let k = 0; k < CFG.arrivals; k++) safe('populate: arrivals', () => spawnArrival(ap, { startS: -rand(4500, 9000) }));
@@ -668,7 +807,9 @@
     for (let k = 0; k < CFG.queued; k++) safe('populate: queued departures', () => startDeparture(ap, 'hold'));
     for (let k = 0; k < CFG.taxiingOut; k++) safe('populate: taxiing out', () => startDeparture(ap, 'taxi'));
     ap.lastDep = performance.now() - (CFG.departEveryS - 6) * 1000;   // first takeoff within seconds
-    log(ap.cfg.icao + ' populated: ' + npcs.filter(n => n.ap === ap).length + ' planes');
+    const some = npcs.find(n => n.ap === ap);
+    const gl = some ? toLL(ap.o, some.x, some.y) : [ap.cfg.lat, ap.cfg.lon];
+    log(ap.cfg.icao + ' populated: ' + npcs.filter(n => n.ap === ap).length + ' planes; ground height here: ' + globeHeight(gl[0], gl[1]) + ' m (Cesium), ' + geofsHeight(gl[0], gl[1]) + ' m (GeoFS), nominal ' + ap.cfg.elev + ' m');
   }
 
   function clearAirport(ap) {
@@ -712,6 +853,7 @@
       while (holdIdx > 0 && back < need) {
         back += Math.hypot(path[holdIdx].x - path[holdIdx - 1].x, path[holdIdx].y - path[holdIdx - 1].y); holdIdx--;
       }
+      while (holdIdx > 0 && npcs.some(o => o.ap === ap && o.phase !== 'park' && o.agl < 3 && (o.holdWait || o.v < 0.5) && Math.hypot(o.x - path[holdIdx].x, o.y - path[holdIdx].y) < 95)) holdIdx--;   // keep clear of planes already waiting
       const route = [];
       path.forEach((n, idx) => {
         const last = idx === path.length - 1;
@@ -751,7 +893,8 @@
       const first = n.route[0], nx = n.route[1] || first;
       if (mode === 'hold' || mode === 'taxi') {
         const hi = plan.holdIdx;
-        const idx = mode === 'hold' ? hi : Math.max(0, Math.floor(Math.random() * Math.max(1, hi)));
+        let idx = mode === 'hold' ? hi : Math.max(0, Math.floor(Math.random() * Math.max(1, hi)));
+        if (mode === 'taxi') for (let t = 0; t < 8 && groundNear(ap, n.route[idx].x, n.route[idx].y, 140, n); t++) idx = Math.max(0, Math.floor(Math.random() * Math.max(1, hi)));
         const w = n.route[idx], nw = n.route[Math.min(idx + 1, n.route.length - 1)];
         Object.assign(n, { x: w.x, y: w.y, hdg: norm360(Math.atan2(nw.x - w.x, nw.y - w.y) * deg), agl: 0, prevAgl: 0 });
         if (mode === 'hold') {
@@ -802,8 +945,24 @@
     const want = Math.atan2(dx, dy) * deg;
     const herr = Math.abs(wrap180(want - n.hdg));
     let target = w.spd * kts;
+    if (!air && (w.ph === 'taxi' || w.ph === 'hold' || w.ph === 'xhold' || w.ph === 'lineup' || w.ph === 'park') && target < CFG.taxiKts * kts) {
+      // a slow point ahead (turn, hold line, stand) only limits the speed as the plane gets near: it needs to be able to brake in time
+      target = Math.min(CFG.taxiKts * kts, Math.sqrt(target * target + 2 * 1.5 * Math.max(0, Math.hypot(dx, dy) - 10)));
+    }
+    if (!air && (w.ph === 'taxi' || w.ph === 'hold' || w.ph === 'xhold' || w.ph === 'lineup') && !(n.freeUntil > performance.now())) {
+      const gp = gapAhead(n), gap = gp.gap;
+      n.yieldTo = gap < 130 ? gp.id : 0;
+      if (gap < 170) {                                        // stop ~95 m behind the plane in front, slow down before that
+        target = Math.min(target, Math.max(0, (gap - 95) * 0.25));
+        if (target < 0.3 && n.v < 0.3) { n.blockT = (n.blockT || 0) + dt; if (n.blockT > 40) { n.freeUntil = performance.now() + 12000; n.blockT = 0; } }
+        else n.blockT = 0;
+      } else n.blockT = 0;
+    }
     if (!air && herr > 25 && w.ph !== 'takeoff') target = Math.min(target, 3.5);     // slow down for sharp turns so the turn circle stays small
-    const a = target > n.v ? ((w.ph === 'takeoff' || w.ph === 'climb') ? CFG.takeoffAccel : CFG.accel) : CFG.decel;
+    const landing = air || w.ph === 'approach' || w.ph === 'flare';
+    const braking = w.ph === 'touch' || w.ph === 'rollout';
+    const dec = landing ? CFG.airDecel : braking ? CFG.rolloutDecel : CFG.decel;
+    const a = target > n.v ? ((w.ph === 'takeoff' || w.ph === 'climb') ? CFG.takeoffAccel : CFG.accel) : dec;
     n.v += clamp(target - n.v, -a * dt, a * dt);
 
     const maxTurn = (air ? 4 : 30 * Math.min(1, n.v / 3)) * dt;
@@ -822,10 +981,30 @@
     const vs = (n.agl - n.prevAgl) / Math.max(dt, 0.001);
     n.prevAgl = n.agl;
     let pt = 0;
-    if (w.ph === 'flare') pt = 5;
+    if (w.ph === 'flare') pt = 5.5;                                   // nose up while rounding out
+    else if (w.ph === 'touch') pt = 4;
     else if (w.ph === 'takeoff') pt = n.v > 70 ? 8 : 0;
-    else if (n.agl > 2) pt = clamp(Math.atan2(vs, Math.max(n.v, 1)) * deg + 3, -1, 14);
-    n.pitch += (pt - n.pitch) * Math.min(1, dt * 1.5);
+    else if (n.agl > 2) pt = clamp(Math.atan2(vs, Math.max(n.v, 1)) * deg + (n.kind === 'arr' ? 5.5 : 3), -1, 14);   // landing attitude ~ +2.5 deg
+    n.pitch += (pt - n.pitch) * Math.min(1, dt * (w.ph === 'rollout' ? 0.8 : 1.5));   // nose comes down slowly after touchdown
+
+    if (n.phase === 'takeoff' && n.v > 52 && n.depRwy && n.depRwy.dep === n) n.depRwy.dep = null;   // rolling fast (~100 kts): the next plane may line up behind it
+
+    // two planes meeting head-on on a taxiway: each is drawn a few metres to its right so they pass instead of going through each other
+    {
+      let tgt = 0;
+      if (!air && (w.ph === 'taxi' || w.ph === 'hold' || w.ph === 'xhold' || w.ph === 'lineup')) {
+        const fx = Math.sin(n.hdg * rad), fy = Math.cos(n.hdg * rad);
+        for (const o of npcs) {
+          if (o === n || o.ap !== n.ap || o.phase === 'park' || o.agl > 3) continue;
+          const dx = o.x - n.x, dy = o.y - n.y, along = dx * fx + dy * fy;
+          if (along < -25 || along > 150 || Math.abs(dx * fy - dy * fx) > 40) continue;
+          if (Math.abs(wrap180(o.hdg - n.hdg)) < 140) continue;
+          tgt = 36; break;
+        }
+      }
+      const cur = n.latOff || 0;
+      n.latOff = cur + clamp(tgt - cur, -10 * dt, 10 * dt);
+    }
 
     n.gT -= dt;
     if (n.gT <= 0) { n.gT = 0.5; sampleGround(n); }
@@ -833,7 +1012,8 @@
     if (dist < n.wpBest - 5) { n.wpBest = dist; n.wpT = 0; } else n.wpT += dt;
     const stalled = !air && n.wpT > 20 && n.v > 0.5;                                  // moving, but not getting any closer
     if (stalled && !step.warned) { step.warned = true; console.warn('[NPC Traffic] a ' + n.m.name + ' stopped making progress on its route, skipping ahead'); }
-    const reach = air ? 70 : Math.max(14, n.v * 1.2);
+    const finalPhase = w.ph === 'flare' || w.ph === 'touch';
+    const reach = finalPhase ? 14 : air ? 70 : Math.max(14, n.v * 1.2);                 // flare and touchdown points are passed exactly, never cut short
     const ux = w.x - n.seg.x0, uy = w.y - n.seg.y0;
     const passed = !air && dist < 60 && ((n.x - w.x) * ux + (n.y - w.y) * uy) > 0;     // already beside/past it
     if (dist < reach || passed || stalled || (!air && n.spin > 900)) {                            // 900 deg of turning without arriving = going in circles
@@ -849,6 +1029,7 @@
         return;
       }
       n.i++; n.phase = n.route[n.i].ph;
+      if (n.route[n.i].agl === 0 && n.agl < 1.5) { n.agl = 0; n.prevAgl = 0; }     // wheels are on the runway: no sliver of height left over
       if (n.rwy && n.i === n.relIdx + 1) { n.rwy.arr.delete(n); n.rwy = null; }   // cleared the runway
       if (n.phase === 'climb' && n.depRwy && n.depRwy.dep === n) n.depRwy.dep = null;   // airborne
       if (n.crossRwy && n.i > n.xEnd) { n.crossRwy.crossing.delete(n); n.crossRwy = null; }   // across
@@ -856,15 +1037,67 @@
     }
   }
 
+  // the nearest plane straight ahead on the ground that is going the same way (taxi queues keep their distance).
+  // Oncoming planes pass with a sideways shift instead; crossing planes are left alone so that nobody can block anybody.
+  function gapAhead(n) {
+    const fx = Math.sin(n.hdg * rad), fy = Math.cos(n.hdg * rad); let best = Infinity, who = 0;
+    for (const o of npcs) {
+      if (o === n || o.ap !== n.ap || o.phase === 'park' || o.agl > 3) continue;
+      const dx = o.x - n.x, dy = o.y - n.y, along = dx * fx + dy * fy;
+      if (along <= 0 || along >= best || Math.abs(dx * fy - dy * fx) > 30) continue;
+      if (Math.abs(wrap180(o.hdg - n.hdg)) >= 60) continue;
+      best = along; who = o.id;
+    }
+    return { gap: best, id: who };
+  }
+
   function startCrossing(n, w) { w.xr.crossing.add(n); n.crossRwy = w.xr; n.xEnd = w.xEnd; }
 
+  // reads the ground height under a plane; returns true when it changed
   function sampleGround(n) {
-    const ll = toLL(n.ap.o, n.x, n.y), g = groundAlt(ll[0], ll[1]);
-    if (g != null && Math.abs(g - n.ap.cfg.elev) < 30) { n.gElev = g; n.gOK = true; }
+    const ap = n.ap, ll = toLL(ap.o, n.x, n.y), g = groundAlt(ll[0], ll[1]);
+    if (g == null || !isFinite(g) || g === 0) return false;                       // exactly 0 = terrain not loaded
+    const ref = ap.gRef != null ? ap.gRef : ap.cfg.elev;                          // heights are measured from the ellipsoid: 25-45 m above sea level in Korea and Denmark
+    if (Math.abs(g - ref) >= (ap.gRef != null ? 80 : 120)) return false;
+    ap.gRef = ap.gRef != null ? ap.gRef * 0.9 + g * 0.1 : g;
+    const changed = !n.gOK || Math.abs(g - n.gElev) > 0.2;
+    n.gElev = g; n.gOK = true;
+    return changed;
   }
 
   // ---------------------------------------------------------------- loop
   let last = performance.now(), scanAcc = 0;
+
+  // small text box, only while an airport is loading, for a few seconds after something changed, or when something is wrong
+  let uiEl = null, uiKey = '', uiChanged = 0;
+  function updateStatus(p) {
+    if (!CFG.showStatus || typeof document === 'undefined') return;
+    const lines = []; let busy = false, bad = false, key = '';
+    for (const a of airports) {
+      const km = Math.hypot(...toXY(a.o, p[0], p[1])) / 1000;
+      if (km > 400) continue;
+      const n = npcs.filter(x => x.ap === a).length;
+      key += a.cfg.icao + a.state + (a.populated ? 'P' : '');
+      if (a.state === 'ready') {
+        if (a.populated && n === 0) { lines.push(a.cfg.icao + ': ready (' + a.info + ') but no plane could be placed'); bad = true; key += '!'; }
+        else if (a.populated) lines.push(a.cfg.icao + ': ' + n + ' planes (' + a.info + ')');
+        else lines.push(a.cfg.icao + ': ready, ' + km.toFixed(0) + ' km away');
+      } else if (a.state === 'failed') { lines.push(a.cfg.icao + ' FAILED: ' + (a.err || 'no usable data') + ((a.tries || 0) < 3 ? ' [retrying]' : '')); bad = true; }
+      else { lines.push(a.cfg.icao + ': loading airport layout...'); busy = true; }
+    }
+    if (!lines.length) { if (uiEl) uiEl.style.display = 'none'; return; }
+    const now = performance.now();
+    if (key !== uiKey) { uiKey = key; uiChanged = now; }
+    const show = bad || busy || now - uiChanged < 20000;
+    try {
+      if (show && !uiEl) {
+        uiEl = document.createElement('div');
+        uiEl.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;max-width:46vw;padding:6px 9px;background:rgba(0,0,0,.72);color:#fff;font:12px/1.35 monospace;border-radius:4px;pointer-events:none;white-space:pre-wrap';
+        document.body.appendChild(uiEl);
+      }
+      if (uiEl) { uiEl.textContent = 'NPC Traffic ' + 'v0.8.4' + '\n' + lines.join('\n'); uiEl.style.display = show ? 'block' : 'none'; }
+    } catch (e) {}
+  }
 
   let statusAt = 0;
   function scan() {
@@ -873,18 +1106,20 @@
     if (!p) return;
     if (performance.now() - statusAt > 15000) {
       statusAt = performance.now();
-      airports.forEach(a => log(a.cfg.icao + ': ' + a.state + ', ' + (Math.hypot(...toXY(a.o, p[0], p[1])) / 1000).toFixed(1) + ' km away (needs < ' + CFG.activeRadiusKm + '), ' + npcs.filter(n => n.ap === a).length + ' planes'));
+      airports.forEach(a => log(a.cfg.icao + ': ' + a.state + ', ' + (Math.hypot(...toXY(a.o, p[0], p[1])) / 1000).toFixed(1) + ' km away (needs < ' + CFG.activeRadiusKm + '), ' + npcs.filter(n => n.ap === a).length + ' planes, ' + modelsFor(a).length + ' of ' + models.length + ' models allowed here' + (modelsFor(a).filter(m => m.airports.length).length ? ' (' + modelsFor(a).filter(m => m.airports.length).map(m => m.name).join(', ') + ' only here)' : '')));
     }
     const lim = CFG.activeRadiusKm * 1000;
     for (const ap of airports) {
-      if (ap.state === 'idle') scanAirport(ap);
-      if (ap.state !== 'ready') continue;
       const d = Math.hypot(...toXY(ap.o, p[0], p[1]));
+      if (ap.state === 'idle' && d < 400000) scanAirport(ap);                 // load an airport's layout when you are within 400 km
+      if (ap.state !== 'ready') continue;
       if (!ap.populated && d < lim) { ap.populated = true; populate(ap); }
       else if (ap.populated && d > lim * 1.3) { clearAirport(ap); ap.populated = false; }
       else if (ap.populated) {
         const pp = toXY(ap.o, p[0], p[1]);
-        if (arrivalCount() < CFG.maxMoving) safe('new arrival', () => spawnArrival(ap));
+        const tNow = performance.now();
+        if (arrivalCount() < CFG.maxMoving && tNow - (ap.lastArrSpawn || 0) > CFG.arrivalEveryS * 1000)
+          safe('new arrival', () => { if (spawnArrival(ap)) ap.lastArrSpawn = tNow; });
         safe('minimum counts', () => fillMinimums(ap, false, pp[0], pp[1]));
         const parkedNow = npcs.filter(n => n.ap === ap && n.phase === 'park').length;
         if (parkedNow < CFG.parked * 0.6) safe('parked top-up', () => addParked(ap, 1, 2000, pp[0], pp[1]));   // appears out of sight
@@ -894,10 +1129,9 @@
         }
       }
     }
-    // parked planes: pick up the real terrain height once it has loaded around them
-    for (const n of npcs) {
-      if (n.isStatic && !n.gOK) { sampleGround(n); if (n.gOK) render(n); }
-    }
+    // parked planes: keep following the terrain height as finer terrain tiles load
+    for (const n of npcs) { if (n.isStatic && (sampleGround(n) || !n.ent)) render(n); }
+    updateStatus(p);
   }
 
   function tick() {
@@ -926,15 +1160,15 @@
       if (bootTries++ % 10 === 0) log('waiting for: ' + missing.join(', '));
       return setTimeout(boot, 1000);
     }
-    log('v0.6.5 started');
+    log('v0.8.4 started');
     loadModels();
-    airports.forEach(scanAirport);                         // scan now, so the data is ready before you get near
     try { geofs.api.viewer.scene.preRender.addEventListener(tick); } catch (e) { setInterval(tick, 33); }
 
     // console helpers only, nothing on screen
     W.npcTraffic = {
       debug() { return npcs.map(n => ({ wi: n.i, id: n.id, hdg: n.hdg, x: Math.round(n.x), y: Math.round(n.y), model: n.m.name, kind: n.kind || 'parked', phase: n.phase, agl: Math.round(n.agl), kts: Math.round(n.v / kts) })); },
       status() { return airports.map(a => ({ icao: a.cfg.icao, state: a.state, runways: a.runways.length, stands: a.parks.length, populated: a.populated, planes: npcs.filter(n => n.ap === a).length, models: models.length })); },
+      ground() { return npcs.slice(0, 8).map(n => { const ll = toLL(n.ap.o, n.x, n.y); return { airport: n.ap.cfg.icao, model: n.m.name, phase: n.phase, usedM: Math.round(n.gElev * 10) / 10, known: n.gOK, cesiumGlobeM: globeHeight(ll[0], ll[1]), geofsM: geofsHeight(ll[0], ll[1]), nominalElevM: n.ap.cfg.elev }; }); },
       clear() { npcs.slice().forEach(destroy); airports.forEach(a => { a.populated = false; }); },
       repopulate() { airports.forEach(a => { if (a.state === 'ready') { clearAirport(a); a.populated = true; populate(a); } }); },
       rescan() {
